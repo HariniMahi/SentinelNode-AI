@@ -1,14 +1,40 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include <Wire.h>
+#include <vector>
 
+// ================= HARDWARE =================
+const int POWER_LED = 2;     
+const int ALERT_LED = 4;     
+const int BUZZER_PIN = 15;   
+
+const int buzzerChannel = 0;
+const int buzzerFreq = 1000;
+const int buzzerResolution = 8;
+
+// ================= WIFI =================
 const char* ssid = "cmscet tp2";
 const char* password = "Welcometocmscet";
 
-const char* serverURL = "http://192.168.1.9:5000/log";
+// ================= BACKEND =================
+const char* serverUrl = "http://192.168.0.217:8000/api/log";
 
 WebServer server(80);
 
+struct Attempt {
+  String ip;
+  String user;
+  String pass;
+};
+
+std::vector<Attempt> attempts;
+
+// Backend buffer
+String pendingJSON = "";
+bool sendToBackend = false;
+
+// ================= HTML =================
 String getHTMLPage() {
   return R"rawliteral(
   <!DOCTYPE html>
@@ -36,59 +62,127 @@ String getHTMLPage() {
   )rawliteral";
 }
 
+// ================= ROUTES =================
 void handleRoot() {
   server.send(200, "text/html", getHTMLPage());
 }
 
-void handleLogin() {
-  String username = server.arg("username");
-  String password = server.arg("password");
+void indicateAttack() {
+  Serial.println("⚠ Attack detected!");
 
+  digitalWrite(ALERT_LED, HIGH);
+  ledcWriteTone(buzzerChannel, buzzerFreq);
+  delay(300);
+  ledcWriteTone(buzzerChannel, 0);
+  digitalWrite(ALERT_LED, LOW);
+}
+
+void handleDashboard() {
+  String html = "<html><body><h2>Login Attempts</h2><ul>";
+  for (auto &a : attempts) {
+    html += "<li>" + a.ip + " - " + a.user + " / " + a.pass + "</li>";
+  }
+  html += "</ul></body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleLogin() {
+
+  String username = server.arg("username");
+  String passwordInput = server.arg("password");
   String ip = server.client().remoteIP().toString();
 
-  Serial.println("New Attempt:");
+  Serial.println("=================================");
+  Serial.println("New Login Attempt:");
   Serial.println("IP: " + ip);
   Serial.println("Username: " + username);
-  Serial.println("Password: " + password);
+  Serial.println("Password: " + passwordInput);
 
-  // Send to backend
-  HTTPClient http;
-  http.begin(serverURL);
-  http.addHeader("Content-Type", "application/json");
+  attempts.push_back({ip, username, passwordInput});
 
-  String jsonData = "{";
-  jsonData += "\"ip\":\"" + ip + "\",";
-  jsonData += "\"username\":\"" + username + "\",";
-  jsonData += "\"password\":\"" + password + "\"";
-  jsonData += "}";
+  indicateAttack();
 
-  int httpResponseCode = http.POST(jsonData);
-  http.end();
+  // Prepare JSON for backend
+  pendingJSON = "{";
+  pendingJSON += "\"ip\":\"" + ip + "\",";
+  pendingJSON += "\"username\":\"" + username + "\",";
+  pendingJSON += "\"password\":\"" + passwordInput + "\"";
+  pendingJSON += "}";
+
+  sendToBackend = true;
 
   server.send(200, "text/html", "<h3>Invalid Credentials</h3>");
 }
 
+// ================= SETUP =================
 void setup() {
+
+  pinMode(POWER_LED, OUTPUT);
+  pinMode(ALERT_LED, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
   Serial.begin(115200);
 
-  WiFi.begin(ssid, password);
+  ledcSetup(buzzerChannel, buzzerFreq, buzzerResolution);
+  ledcAttachPin(BUZZER_PIN, buzzerChannel);
 
-  Serial.print("Connecting to WiFi");
+  Serial.println("SentinelNode-AI Starting...");
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println("\nConnected!");
-  Serial.print("ESP32 IP Address: ");
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
+
+  digitalWrite(POWER_LED, HIGH);
 
   server.on("/", handleRoot);
   server.on("/login", HTTP_POST, handleLogin);
-
+  server.on("/dashboard", handleDashboard);
   server.begin();
+
+  Serial.println("Honeypot Ready!");
 }
 
+// ================= LOOP =================
 void loop() {
+
   server.handleClient();
+
+  if (sendToBackend && WiFi.status() == WL_CONNECTED) {
+
+    WiFiClient client;
+    HTTPClient http;
+
+    http.setTimeout(5000);
+    http.setReuse(false);
+
+    if (http.begin(client, serverUrl)) {
+
+      http.addHeader("Content-Type", "application/json");
+
+      int httpResponseCode = http.POST(pendingJSON);
+
+      if (httpResponseCode > 0) {
+        Serial.print("Backend Response: ");
+        Serial.println(httpResponseCode);
+      } else {
+        Serial.print("Backend Error: ");
+        Serial.println(httpResponseCode);
+      }
+
+      http.end();
+
+    } else {
+      Serial.println("HTTP Begin Failed");
+    }
+
+    sendToBackend = false;
+  }
 }

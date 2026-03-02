@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "SentinelNodeESP32",
+			"path": "../../../../Documents/PlatformIO/Projects/SentinelNodeESP32"
+		}
+	],
+	"settings": {}
+}
